@@ -1,7 +1,6 @@
 from flask import Flask
 import threading
 import subprocess
-import os
 
 app = Flask(__name__)
 
@@ -10,7 +9,7 @@ def home():
     return "Bot is Running ✅"
 
 def run_bot():
-    os.system("python bot.py")
+    subprocess.run(["python3", "bot.py"])
 
 if __name__ == "__main__":
     t = threading.Thread(target=run_bot)
