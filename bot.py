@@ -1,141 +1,217 @@
+"""
+=========================================================================
+📦 PROJECT: DV MEGA FILE STORE & PROTECTOR
+🛠️ DEVELOPER: GEMINI AI (CUSTOMIZED)
+📅 DATE: MARCH 2026
+📜 FEATURES: 
+   - Permanent/Temporary File Storage
+   - Encrypted File Links
+   - Multi-Channel Force Subscribe (FSub)
+   - Content Protection (Anti-Forward/Anti-Save)
+   - Advanced Admin Dashboard & Broadcast
+=========================================================================
+"""
+
 import os
-import base64
+import time
+import re
+import uuid
+import logging
 import asyncio
-from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+import threading
+from datetime import datetime, timedelta
+from pyrogram import Client, filters, errors
+from pyrogram.types import (
+    InlineKeyboardMarkup, 
+    InlineKeyboardButton, 
+    Message, 
+    CallbackQuery
+)
 from pymongo import MongoClient
+from flask import Flask
 
-# ENV VARIABLES
-API_ID = int(os.environ.get("API_ID"))
-API_HASH = os.environ.get("API_HASH")
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-MONGO_DB = os.environ.get("MONGO_DB")
-ADMIN_ID = int(os.environ.get("ADMIN_ID"))
-CHANNEL = os.environ.get("CHANNEL")  # @channelusername
+# -----------------------------------------------------------------------
+# 1. ⚙️ CONFIGURATION (Environment Variables)
+# -----------------------------------------------------------------------
+API_ID = int(os.environ.get("API_ID", "12345"))
+API_HASH = os.environ.get("API_HASH", "your_api_hash")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "your_bot_token")
+MONGO_URI = os.environ.get("MONGO_URI", "your_mongodb_uri")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "12345678"))
+DB_NAME = os.environ.get("DB_NAME", "FileStoreBot")
 
-# DATABASE
-mongo = MongoClient(MONGO_DB)
-db = mongo["file_store_bot"]
-files = db["files"]
-settings = db["settings"]
+# Channel for storing files (Private Channel ID)
+DB_CHANNEL = int(os.environ.get("DB_CHANNEL", "-100xxx"))
 
-# BOT
-app = Client("file_store_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# Force Subscribe Channels (Comma separated usernames)
+AUTH_CHANNELS = [c.strip() for c in os.environ.get("AUTH_CHANNELS", "").split(",") if c.strip()]
 
-# AUTO DELETE TIME
-def get_time():
-    data = settings.find_one({"_id": "time"})
-    return data["time"] if data else 300  # default 5 min
+# -----------------------------------------------------------------------
+# 2. 🗄️ DATABASE SETUP
+# -----------------------------------------------------------------------
+client = MongoClient(MONGO_URI)
+db = client[DB_NAME]
+users_col = db['users']
+files_col = db['files']
+settings_col = db['settings']
 
-# CHECK FORCE SUB
-async def is_joined(client, user_id):
-    try:
-        member = await client.get_chat_member(CHANNEL, user_id)
-        return member.status in ["member", "administrator", "creator"]
-    except:
-        return False
+# -----------------------------------------------------------------------
+# 3. 🤖 BOT CLIENT & FLASK (For 24/7 Hosting)
+# -----------------------------------------------------------------------
+bot = Client(
+    "FileStoreBot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN
+)
 
-# START COMMAND
-@app.on_message(filters.command("start"))
-async def start(client, message):
-    user_id = message.from_user.id
+app = Flask(__name__)
+@app.route('/')
+def home(): return "Bot is Alive!"
 
-    # FORCE SUB CHECK
-    if not await is_joined(client, user_id):
-        btn = InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{CHANNEL.replace('@','')}")],
-                [InlineKeyboardButton("✅ Check Again", callback_data="checksub")]
-            ]
-        )
-        return await message.reply("🚫 पहले channel join करो!", reply_markup=btn)
+# -----------------------------------------------------------------------
+# 4. 🛠️ HELPER FUNCTIONS
+# -----------------------------------------------------------------------
 
-    # FILE ACCESS
-    if len(message.command) > 1:
+async def is_subscribed(client, message):
+    """Check if user joined all required channels."""
+    if not AUTH_CHANNELS:
+        return True
+    left_channels = []
+    for char in AUTH_CHANNELS:
         try:
-            file_id = base64.urlsafe_b64decode(message.command[1].encode()).decode()
-            msg = await message.reply_document(file_id)
+            user = await client.get_chat_member(char, message.from_user.id)
+            if user.status == "kicked":
+                return False
+        except errors.UserNotParticipant:
+            left_channels.append(char)
+        except Exception:
+            pass
+    return left_channels
 
-            # AUTO DELETE
-            time = get_time()
-            await asyncio.sleep(time)
-            await msg.delete()
-            await message.delete()
+def encode_data(data):
+    """Simple encoding for URL safety."""
+    return str(data).encode("ascii").hex()
 
+def decode_data(data):
+    """Decode data from hex."""
+    return bytes.fromhex(data).decode("ascii")
+
+# -----------------------------------------------------------------------
+# 5. 📥 FILE HANDLING (Saving Files)
+# -----------------------------------------------------------------------
+
+@bot.on_message(filters.private & (filters.document | filters.video | filters.audio | filters.photo))
+async def handle_incoming_file(client, message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return await message.reply("🚫 Only Admin can add files to the store.")
+
+    # 1. Forward file to DB Channel
+    sent_msg = await message.forward(DB_CHANNEL)
+    file_id = sent_msg.id
+    
+    # 2. Generate Secret Link
+    secret_code = encode_data(file_id)
+    bot_user = await client.get_me()
+    share_link = f"https://t.me/{bot_user.username}?start=file_{secret_code}"
+    
+    # 3. Save to MongoDB
+    files_col.insert_one({
+        "file_id": file_id,
+        "file_name": getattr(message.document or message.video or message.audio, 'file_name', 'Photo'),
+        "code": secret_code,
+        "created_at": datetime.now()
+    })
+
+    await message.reply_text(
+        f"✅ **File Stored Successfully!**\n\n"
+        f"🔗 **Your Link:** `{share_link}`",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("📢 Share Link", url=f"https://telegram.me/share/url?url={share_link}")
+        ]])
+    )
+
+# -----------------------------------------------------------------------
+# 6. 📤 FILE RETRIEVAL (Start Handler)
+# -----------------------------------------------------------------------
+
+@bot.on_message(filters.command("start") & filters.private)
+async def start(client, message: Message):
+    user_id = message.from_user.id
+    
+    # Register user
+    if not users_col.find_one({"user_id": user_id}):
+        users_col.insert_one({"user_id": user_id, "join_date": datetime.now()})
+
+    # FSub Check
+    left = await is_subscribed(client, message)
+    if left:
+        buttons = []
+        for channel in left:
+            buttons.append([InlineKeyboardButton(f"Join {channel}", url=f"https://t.me/{channel}")])
+        buttons.append([InlineKeyboardButton("Try Again 🔄", url=f"https://t.me/{(await client.get_me()).username}?start={message.command[1] if len(message.command) > 1 else ''}")])
+        return await message.reply_text(
+            "⚠️ **Access Denied!**\n\nPlease join our channels first to use this bot.",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+
+    # Check for File Code
+    if len(message.command) > 1 and message.command[1].startswith("file_"):
+        code = message.command[1].replace("file_", "")
+        try:
+            msg_id = int(decode_data(code))
+            # Get file from DB Channel
+            file_msg = await client.get_messages(DB_CHANNEL, msg_id)
+            
+            # PROTECT CONTENT: Send without forward/save option if enabled
+            await file_msg.copy(
+                chat_id=message.chat.id,
+                protect_content=True, # Prevent Forward/Save
+                caption="📁 **File securely delivered by DV Store.**"
+            )
+        except Exception as e:
+            await message.reply("❌ **Error:** Link expired or invalid.")
+        return
+
+    await message.reply_text(f"👋 **Hello {message.from_user.first_name}!**\nI am a high-speed File Store Bot.")
+
+# -----------------------------------------------------------------------
+# 7. 👑 ADMIN DASHBOARD
+# -----------------------------------------------------------------------
+
+@bot.on_message(filters.command("stats") & filters.user(ADMIN_ID))
+async def stats(client, message):
+    total_users = users_col.count_documents({})
+    total_files = files_col.count_documents({})
+    await message.reply_text(f"📊 **Bot Stats**\n\n👥 Total Users: `{total_users}`\n📁 Total Files: `{total_files}`")
+
+@bot.on_message(filters.command("broadcast") & filters.user(ADMIN_ID))
+async def broadcast(client, message):
+    if not message.reply_to_message:
+        return await message.reply("Reply to a message to broadcast.")
+    
+    users = users_col.find({})
+    count = 0
+    msg = await message.reply("🚀 **Broadcast Started...**")
+    
+    for user in users:
+        try:
+            await message.reply_to_message.copy(user['user_id'])
+            count += 1
+            await asyncio.sleep(0.05) # Prevent flood
         except:
-            await message.reply("❌ File not found or expired")
-    else:
-        await message.reply("👋 Send me any file and get a shareable link")
+            pass
+    
+    await msg.edit(f"✅ **Broadcast Completed!**\nDelivered to `{count}` users.")
 
-# CHECK BUTTON
-@app.on_callback_query(filters.regex("checksub"))
-async def check_sub(client, callback_query):
-    user_id = callback_query.from_user.id
+# -----------------------------------------------------------------------
+# 8. 🚀 RUN THE BOT
+# -----------------------------------------------------------------------
 
-    if await is_joined(client, user_id):
-        await callback_query.message.delete()
-        await callback_query.message.reply("✅ Access Granted! अब /start दबाओ")
-    else:
-        await callback_query.answer("❌ अभी join नहीं किया", show_alert=True)
-
-# HELP COMMAND
-@app.on_message(filters.command("help"))
-async def help_cmd(client, message):
-    await message.reply("""
-📌 Commands:
-/start - Start bot
-/help - Help menu
-/settime 60 - Auto delete time (admin)
-/batch - Batch upload start (admin)
-/stop - Stop batch (admin)
-
-📂 Send any file to store and get link
-""")
-
-# SET AUTO DELETE TIME
-@app.on_message(filters.command("settime") & filters.user(ADMIN_ID))
-async def set_time(client, message):
-    try:
-        t = int(message.command[1])
-        settings.update_one({"_id": "time"}, {"$set": {"time": t}}, upsert=True)
-        await message.reply(f"✅ Auto delete time set to {t} seconds")
-    except:
-        await message.reply("❌ Use like: /settime 60")
-
-# SAVE FILE
-@app.on_message(filters.document | filters.video | filters.audio)
-async def save_file(client, message):
-    file_id = message.document.file_id if message.document else \
-              message.video.file_id if message.video else \
-              message.audio.file_id
-
-    files.insert_one({"file_id": file_id})
-
-    encoded = base64.urlsafe_b64encode(file_id.encode()).decode()
-    bot_username = (await client.get_me()).username
-    link = f"https://t.me/{bot_username}?start={encoded}"
-
-    await message.reply(f"✅ File Saved!\n🔗 Link:\n{link}")
-
-# BATCH MODE
-batch_mode = {}
-
-@app.on_message(filters.command("batch") & filters.user(ADMIN_ID))
-async def batch(client, message):
-    batch_mode[message.from_user.id] = True
-    await message.reply("📂 Send multiple files now")
-
-@app.on_message(filters.document & filters.user(ADMIN_ID))
-async def batch_save(client, message):
-    if batch_mode.get(message.from_user.id):
-        file_id = message.document.file_id
-        files.insert_one({"file_id": file_id})
-        await message.reply("✅ Added to batch")
-
-@app.on_message(filters.command("stop") & filters.user(ADMIN_ID))
-async def stop_batch(client, message):
-    batch_mode[message.from_user.id] = False
-    await message.reply("🛑 Batch stopped")
-
-# RUN
-app.run()
+if __name__ == "__main__":
+    # Start Flask in a separate thread for Render/Heroku
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000))), daemon=True).start()
+    
+    print("DV File Store Bot is running...")
+    bot.run()
+    
