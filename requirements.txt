@@ -1,6 +1,5 @@
-pyrogram
-tgcrypto
-motor
-pymongo
+pyTelegramBotAPI
+pymongo[srv]
+apscheduler
 flask
 
