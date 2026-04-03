@@ -113,6 +113,6 @@ async def start_cmd(client, message):
         await message.reply("Hello")
         ref_link = f"https://t.me/{me.username}?start={user_id}"
 
-        await message.reply(
+        await message.reply("Hello")
             f"🔒 Link locked है!\n\n"
             f
