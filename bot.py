@@ -32,7 +32,6 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    print(f"Web server started on port {PORT}")
 
 # --- Bot Logic ---
 async def is_subscribed(user_id):
@@ -53,7 +52,7 @@ async def start_cmd(client, message):
     if not await is_subscribed(user_id):
         buttons = []
         for i, channel in enumerate(CHANNELS, 1):
-            buttons.append([InlineKeyboardButton(f"Join Channel {i}", url=f"https://t.me/example{i}")]) # यहाँ असली लिंक डालें
+            buttons.append([InlineKeyboardButton(f"Join Channel {i}", url=f"https://t.me/example{i}")])
         
         return await message.reply(
             "❌ **Access Denied!**\n\nलिंक अनलॉक करने के लिए सभी चैनल्स जॉइन करें।",
@@ -82,17 +81,14 @@ async def start_cmd(client, message):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚀 शेयर करें", url=f"https://t.me/share/url?url={ref_link}")]])
         )
 
-# --- Updated Main Execution (Fixed RuntimeError) ---
+# --- FIXED MAIN FUNCTION ---
 async def main():
-    print("Starting Bot...")
-    await bot.start()
-    await start_web_server()
-    print("Bot is Running!")
-    await asyncio.Event().wait()
+    # पक्का करें कि सब कुछ एक ही loop में चले
+    async with bot:
+        await start_web_server()
+        print("Bot and Web Server are Running!")
+        await asyncio.Future() # इसे चालू रखने के लिए
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        pass
-        
+    asyncio.run(main())
+    
