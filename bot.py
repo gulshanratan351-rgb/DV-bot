@@ -110,7 +110,7 @@ async def start_cmd(client, message):
             disable_web_page_preview=True
         )
     else:
-        me = await bot.get_me()
+        await message.reply("Hello")
         ref_link = f"https://t.me/{me.username}?start={user_id}"
 
         await message.reply(
