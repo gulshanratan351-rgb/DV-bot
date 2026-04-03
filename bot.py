@@ -5,12 +5,12 @@ import os, asyncio
 from aiohttp import web
 
 # --- CONFIG ---
-API_ID = int(os.environ.get("API_ID"))
-API_HASH = os.environ.get("API_HASH")
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-MONGO_URL = os.environ.get("MONGO_URL")
-CHANNEL = os.environ.get("CHANNEL_USERNAME")
-ADMIN = int(os.environ.get("ADMIN_ID"))
+API_ID = int(os.environ.get("API_ID", "0"))
+API_HASH = os.environ.get("API_HASH", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+MONGO_URL = os.environ.get("MONGO_URL", "")
+CHANNEL = os.environ.get("CHANNEL_USERNAME", "")
+ADMIN = int(os.environ.get("ADMIN_ID", "0"))
 PORT = int(os.environ.get("PORT", 8080))
 
 # --- DB ---
@@ -35,72 +35,85 @@ async def start_web_server():
 
 # --- CHECK JOIN ---
 async def is_joined(user_id):
+    if not CHANNEL:
+        return True
     try:
         member = await app.get_chat_member(CHANNEL, user_id)
         return member.status in ["member", "administrator", "creator"]
-    except:
+    except Exception as e:
+        print(f"Join Check Error: {e}")
         return False
 
 # --- START ---
-@app.on_message(filters.command("start"))
+@app.on_message(filters.command("start") & filters.private)
 async def start(client, message):
-    # --- TEST REPLY ---
-    await message.reply("✅ बॉट को आपका मैसेज मिल गया है! प्रोसेस चेक हो रही है...")
-    
-    user_id = message.from_user.id
-    args = message.text.split()
+    try:
+        # Step 1: Immediate Reply
+        await message.reply("⚡ बॉट एक्टिव है, डेटा चेक किया जा रहा है...")
+        
+        user_id = message.from_user.id
+        args = message.text.split()
 
-    await users.update_one(
-        {"user_id": user_id},
-        {"$setOnInsert": {"referrals": 0}},
-        upsert=True
-    )
+        # Step 2: Database Update
+        await users.update_one(
+            {"user_id": user_id},
+            {"$setOnInsert": {"referrals": 0}},
+            upsert=True
+        )
 
-    if len(args) > 1:
-        referrer = args[1]
-        if referrer.isdigit() and int(referrer) != user_id:
-            await users.update_one(
-                {"user_id": int(referrer)},
-                {"$inc": {"referrals": 1}}
-            )
+        # Step 3: Referral Logic
+        if len(args) > 1:
+            referrer = args[1]
+            if referrer.isdigit() and int(referrer) != user_id:
+                await users.update_one(
+                    {"user_id": int(referrer)},
+                    {"$inc": {"referrals": 1}}
+                )
 
-    bot_user = await app.get_me()
-    link = f"https://t.me/{bot_user.username}?start={user_id}"
+        # Step 4: Buttons
+        bot_user = await app.get_me()
+        link = f"https://t.me/{bot_user.username}?start={user_id}"
 
-    btn = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{CHANNEL}")],
-        [InlineKeyboardButton("🔁 Check / Unlock", callback_data="check")]
-    ])
+        btn = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{CHANNEL}")],
+            [InlineKeyboardButton("🔁 Check / Unlock", callback_data="check")]
+        ])
 
-    await message.reply(
-        f"🔒 इस लिंक को 5 लोगों को शेयर करें:\n\n`{link}`",
-        reply_markup=btn
-    )
+        await message.reply(
+            f"🔒 **लिंक अनलॉक करने के लिए 5 लोगों को इनवाइट करें।**\n\n"
+            f"🔗 आपका इनवाइट लिंक:\n`{link}`",
+            reply_markup=btn
+        )
+    except Exception as e:
+        await message.reply(f"❌ एरर आया: {e}")
 
 # --- CHECK CALLBACK ---
 @app.on_callback_query(filters.regex("check"))
 async def check(client, callback):
-    user_id = callback.from_user.id
+    try:
+        user_id = callback.from_user.id
 
-    if not await is_joined(user_id):
-        await callback.answer("❌ पहले चैनल जॉइन करें!", show_alert=True)
-        return
+        if not await is_joined(user_id):
+            await callback.answer("❌ पहले चैनल जॉइन करें!", show_alert=True)
+            return
 
-    data = await users.find_one({"user_id": user_id})
-    refs = data.get("referrals", 0) if data else 0
+        data = await users.find_one({"user_id": user_id})
+        refs = data.get("referrals", 0) if data else 0
 
-    if refs >= 5:
-        cfg = await config.find_one({"_id": "data"})
-        file_link = cfg.get("file", "No link set") if cfg else "No link set"
-        await callback.message.reply(f"✅ मिशन पूरा! आपकी लिंक यहाँ है:\n{file_link}")
-    else:
-        await callback.answer(f"⚠️ अभी सिर्फ {refs} रिफरल हुए हैं। 5 पूरे करें!", show_alert=True)
+        if refs >= 5:
+            cfg = await config.find_one({"_id": "data"})
+            file_link = cfg.get("file", "No link set") if cfg else "No link set"
+            await callback.message.reply(f"✅ मिशन पूरा! आपकी लिंक यहाँ है:\n{file_link}")
+        else:
+            await callback.answer(f"⚠️ अभी सिर्फ {refs} रिफरल हुए हैं। 5 पूरे करें!", show_alert=True)
+    except Exception as e:
+        await callback.answer(f"❌ एरर: {e}", show_alert=True)
 
 # --- ADMIN ---
 @app.on_message(filters.command("set") & filters.user(ADMIN))
 async def set_file(client, message):
     if len(message.command) < 2:
-        return await message.reply("Usage: /set https://link.com")
+        return await message.reply("Usage: `/set https://link.com`")
     link = message.text.split(None, 1)[1]
     await config.update_one({"_id": "data"}, {"$set": {"file": link}}, upsert=True)
     await message.reply("✅ टारगेट लिंक सेट हो गया!")
