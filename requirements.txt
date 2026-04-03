@@ -1,5 +1,6 @@
-pyTelegramBotAPI
-pymongo[srv]
-apscheduler
-flask
+pyrogram
+tgcrypto
+motor
+aiohttp
+
 
