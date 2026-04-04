@@ -17,13 +17,13 @@ PORT = int(os.environ.get("PORT", 8080))
 mongo = AsyncIOMotorClient(MONGO_URL)
 db = mongo["multi_channel_db"]
 users = db["users"]
-config = db["config"] # यहाँ टारगेट लिंक और चैनल लिस्ट सेव होगी
+config = db["config"]
 
 app = Client("my_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # --- WEB SERVER ---
 async def home(request):
-    return web.Response(text="Multi-Channel Bot is Running ✅")
+    return web.Response(text="Bot is Running ✅")
 
 async def start_web_server():
     server = web.Application()
@@ -38,14 +38,21 @@ async def get_channels():
     cfg = await config.find_one({"_id": "channels_list"})
     return cfg.get("list", []) if cfg else []
 
+# ⭐ सुधरा हुआ Helper: जो जॉइनिंग चेक करेगा
 async def is_joined(user_id):
     channels = await get_channels()
+    if not channels:
+        return True
+    
     for ch in channels:
         try:
-            member = await app.get_chat_member(ch, user_id)
+            # ID को साफ़ करके उसे Integer में बदलना (ताकि एरर न आए)
+            ch_id = int(str(ch['id']).strip())
+            member = await app.get_chat_member(ch_id, user_id)
             if member.status not in ["member", "administrator", "creator"]:
                 return False
-        except:
+        except Exception as e:
+            print(f"Checking Error for {ch['id']}: {e}")
             return False
     return True
 
@@ -55,7 +62,6 @@ async def start(client, message):
     user_id = message.from_user.id
     args = message.text.split()
     
-    # User Registration
     user_data = await users.find_one({"user_id": user_id})
     if not user_data:
         await users.insert_one({"user_id": user_id, "referrals": 0})
@@ -63,23 +69,23 @@ async def start(client, message):
             referrer = int(args[1])
             if referrer != user_id:
                 await users.update_one({"user_id": referrer}, {"$inc": {"referrals": 1}})
+                try: await client.send_message(referrer, "🎊 किसी ने आपके लिंक से जॉइन किया!")
+                except: pass
 
-    # Score & Link
     current_data = await users.find_one({"user_id": user_id})
     count = current_data.get("referrals", 0)
     bot_me = await app.get_me()
     
-    # Generate Join Buttons dynamically
     channels = await get_channels()
     keyboard = []
     for index, ch in enumerate(channels, 1):
-        keyboard.append([InlineKeyboardButton(f"📢 Join Channel {index}", url=f"https://t.me/{ch}")])
+        keyboard.append([InlineKeyboardButton(f"📢 Join Channel {index}", url=ch['link'])])
     
     keyboard.append([InlineKeyboardButton("🔁 Check Status / Unlock", callback_data="check")])
 
     await message.reply(
         f"👋 **नमस्ते {message.from_user.first_name}!**\n\n"
-        f"लिंक के लिए **5 रिफरल** और ऊपर दिए गए सभी चैनल जॉइन करना ज़रूरी है।\n\n"
+        f"लिंक के लिए **5 रिफरल** और चैनल जॉइन करना ज़रूरी है।\n\n"
         f"📊 आपका स्कोर: **{count}/5**\n"
         f"🔗 रिफरल लिंक: `https://t.me/{bot_me.username}?start={user_id}`",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -87,58 +93,56 @@ async def start(client, message):
 
 # --- ADMIN COMMANDS ---
 
+@app.on_message(filters.command("clear_all") & filters.user(ADMIN))
+async def clear_all(client, message):
+    await config.delete_one({"_id": "channels_list"})
+    await message.reply("🧹 डेटाबेस साफ़! अब नए सिरे से `/add_channel` करें।")
+
 @app.on_message(filters.command("add_channel") & filters.user(ADMIN))
 async def add_channel(client, message):
-    if len(message.command) < 2:
-        return await message.reply("Usage: `/add_channel channel_username` (बिना @ के)")
+    args = message.text.split()
+    if len(args) < 3:
+        return await message.reply("❌ लिखें: `/add_channel ID LINK` \n\nउदाहरण: `/add_channel -1003474091462 https://t.me/+joinlink`")
     
-    new_ch = message.text.split(None, 1)[1].replace("@", "")
-    await config.update_one({"_id": "channels_list"}, {"$addToSet": {"list": new_ch}}, upsert=True)
-    await message.reply(f"✅ चैनल `@{new_ch}` लिस्ट में जोड़ दिया गया है।")
-
-@app.on_message(filters.command("del_channel") & filters.user(ADMIN))
-async def del_channel(client, message):
-    if len(message.command) < 2:
-        return await message.reply("Usage: `/del_channel channel_username`")
+    ch_id = args[1]
+    ch_link = args[2]
     
-    target_ch = message.text.split(None, 1)[1].replace("@", "")
-    await config.update_one({"_id": "channels_list"}, {"$pull": {"list": target_ch}})
-    await message.reply(f"❌ चैनल `@{target_ch}` लिस्ट से हटा दिया गया है।")
-
-@app.on_message(filters.command("channels") & filters.user(ADMIN))
-async def list_channels(client, message):
-    channels = await get_channels()
-    if not channels: return await message.reply("अभी कोई चैनल सेट नहीं है।")
-    msg = "**सेट किए गए चैनल्स:**\n\n" + "\n".join([f"• @{c}" for c in channels])
-    await message.reply(msg)
+    await config.update_one(
+        {"_id": "channels_list"}, 
+        {"$addToSet": {"list": {"id": ch_id, "link": ch_link}}}, 
+        upsert=True
+    )
+    await message.reply(f"✅ चैनल सेट!\nID: `{ch_id}`\nLink: {ch_link}")
 
 @app.on_message(filters.command("set") & filters.user(ADMIN))
 async def set_link(client, message):
-    if len(message.command) < 2: return await message.reply("Usage: `/set link`")
-    target = message.text.split(None, 1)[1]
+    args = message.text.split(None, 1)
+    if len(args) < 2: return await message.reply("Usage: `/set link`")
+    target = args[1]
     await config.update_one({"_id": "target_data"}, {"$set": {"file": target}}, upsert=True)
-    await message.reply("✅ टारगेट लिंक सेट हो गया!")
+    await message.reply(f"✅ टारगेट लिंक सेट हो गया!")
 
 # --- CHECK CALLBACK ---
 @app.on_callback_query(filters.regex("check"))
 async def check_callback(client, callback):
     user_id = callback.from_user.id
     if not await is_joined(user_id):
-        return await callback.answer("❌ आपने सभी चैनल जॉइन नहीं किए हैं!", show_alert=True)
+        return await callback.answer("❌ पहले सभी चैनल जॉइन करें!", show_alert=True)
     
     user_data = await users.find_one({"user_id": user_id})
-    if user_data and user_data.get("referrals", 0) >= 5:
+    refs = user_data.get("referrals", 0) if user_data else 0
+    if refs >= 5:
         cfg = await config.find_one({"_id": "target_data"})
         link = cfg.get("file", "Link not set") if cfg else "Link not set"
         await callback.message.edit_text(f"✅ अनलॉक हो गया!\n\nलिंक: {link}")
     else:
-        await callback.answer(f"⚠️ अभी रिफरल कम हैं!", show_alert=True)
+        await callback.answer(f"⚠️ स्कोर: {refs}/5 रिफरल पूरे करें!", show_alert=True)
 
 # --- RUN ---
 async def run_bot():
     await start_web_server()
     await app.start()
-    print("Multi-Channel Admin Bot Started! ✅")
+    print("DV Movie Bot Started! ✅")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
