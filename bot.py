@@ -38,17 +38,40 @@ async def get_channels():
     cfg = await config.find_one({"_id": "channels_list"})
     return cfg.get("list", []) if cfg else []
 
-async def is_joined(user_id):
-    channels = await get_channels()
-    for ch in channels:
-        try:
-            member = await app.get_chat_member(ch, user_id)
-            if member.status not in ["member", "administrator", "creator"]:
-                return False
-        except:
-            return False
-    return True
+async async def is_joined(user_id):
+    try:
+        cfg = await config.find_one({"_id": "channels_list"})
+        chans = cfg.get("list", []) if cfg else []
+        
+        if not chans: 
+            return True 
 
+        for ch in chans:
+            try:
+                # Channel ki ID ya Username nikalna
+                ch_id = ch['id'] 
+                
+                # Agar username @ ke saath hai toh @ hatana, nahi toh direct use karna
+                if isinstance(ch_id, str) and not ch_id.startswith("-100"):
+                    ch_id = ch_id.replace("@", "")
+                
+                # Member check karna
+                member = await app.get_chat_member(ch_id, user_id)
+                
+                # Check status
+                if member.status not in ["member", "administrator", "creator"]:
+                    return False
+            except Exception as e:
+                # Agar bot admin hai toh yahan error nahi aana chahiye
+                # Agar 'User not found' aata hai toh matlab join nahi kiya
+                print(f"Check failed for {ch_id}: {e}")
+                return False 
+        
+        return True 
+    except Exception as e:
+        print(f"Main Error: {e}")
+        return False
+        
 # --- COMMAND: START ---
 @app.on_message(filters.command("start") & filters.private)
 async def start(client, message):
