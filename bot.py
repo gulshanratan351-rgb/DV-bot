@@ -20,12 +20,16 @@ users = db["users"]
 config = db["config"]
 
 # --- WEB SERVER (For Render) ---
-async def start_web():
+async def home(request):
+    return web.Response(text="Multi-Channel Bot is Running ✅")
+
+async def start_web_server():
     server = web.Application()
-    server.router.add_get("/", lambda r: web.Response(text="Bot is Alive ✅"))
+    server.router.add_get("/", home)
     runner = web.AppRunner(server)
     await runner.setup()
-    await web.TCPSite(runner, "0.0.0.0", PORT).start()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
 
 # --- JOIN CHECK ---
 async def is_joined(user_id):
