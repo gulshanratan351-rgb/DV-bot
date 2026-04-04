@@ -1,5 +1,6 @@
-import os, asyncio
-from pyrogram import Client, filters, errors
+import os
+import asyncio
+from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from motor.motor_asyncio import AsyncIOMotorClient
 from aiohttp import web
