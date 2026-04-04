@@ -22,7 +22,6 @@ config = db["config"]
 # --- WEB SERVER (For Render) ---
 async def home(request):
     return web.Response(text="Multi-Channel Bot is Running ✅")
-
 async def start_web_server():
     server = web.Application()
     server.router.add_get("/", home)
