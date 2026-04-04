@@ -1,5 +1,4 @@
-import os
-import asyncio
+import os, asyncio
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -10,160 +9,129 @@ API_ID = int(os.environ.get("API_ID", "0"))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 MONGO_URL = os.environ.get("MONGO_URL", "")
-ADMIN = int(os.environ.get("ADMIN_ID", "0"))
+ADMIN = int(os.environ.get("ADMIN_ID", "6158373752")) # अपनी ID यहाँ पक्की करें
 PORT = int(os.environ.get("PORT", 8080))
 
-# --- DATABASE ---
+app = Client("dv_final_pro", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 mongo = AsyncIOMotorClient(MONGO_URL)
-db = mongo["multi_channel_db"]
+db = mongo["bot_database_v2"] # नया डेटाबेस नाम ताकि पुराना कचरा हट जाए
 users = db["users"]
-config = db["config"] # यहाँ टारगेट लिंक और चैनल लिस्ट सेव होगी
+config = db["config"]
 
-app = Client("my_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-
-# --- WEB SERVER ---
-async def home(request):
-    return web.Response(text="Multi-Channel Bot is Running ✅")
-
-async def start_web_server():
+# --- WEB SERVER (Render को जगाए रखने के लिए) ---
+async def start_web():
     server = web.Application()
-    server.router.add_get("/", home)
-    runner = web.AppRunner(server)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
+    server.router.add_get("/", lambda r: web.Response(text="Bot is Running 100% ✅"))
+    await web.TCPSite(web.AppRunner(server), "0.0.0.0", PORT).start()
 
-# --- HELPERS ---
-async def get_channels():
-    cfg = await config.find_one({"_id": "channels_list"})
-    return cfg.get("list", []) if cfg else []
-
-async async def is_joined(user_id):
+# --- ⭐ JOIN CHECK (PUBLIC & PRIVATE FIXED) ---
+async def is_joined(user_id):
     try:
         cfg = await config.find_one({"_id": "channels_list"})
         chans = cfg.get("list", []) if cfg else []
-        
-        if not chans: 
-            return True 
+        if not chans: return True
 
         for ch in chans:
+            # Username/ID को साफ़ करना (Space और @ हटाना)
+            raw_id = str(ch['id']).strip().replace("@", "")
             try:
-                # Channel ki ID ya Username nikalna
-                ch_id = ch['id'] 
+                # अगर ID नंबर है तो उसे Integer बनाना, नहीं तो Username रहने देना
+                final_target = int(raw_id) if raw_id.startswith("-") or raw_id.isdigit() else raw_id
                 
-                # Agar username @ ke saath hai toh @ hatana, nahi toh direct use karna
-                if isinstance(ch_id, str) and not ch_id.startswith("-100"):
-                    ch_id = ch_id.replace("@", "")
-                
-                # Member check karna
-                member = await app.get_chat_member(ch_id, user_id)
-                
-                # Check status
+                member = await app.get_chat_member(final_target, user_id)
                 if member.status not in ["member", "administrator", "creator"]:
                     return False
             except Exception as e:
-                # Agar bot admin hai toh yahan error nahi aana chahiye
-                # Agar 'User not found' aata hai toh matlab join nahi kiya
-                print(f"Check failed for {ch_id}: {e}")
-                return False 
-        
-        return True 
+                print(f"Check Error for {raw_id}: {e}")
+                return False # बोट एडमिन नहीं होगा तो भी False आएगा
+        return True
     except Exception as e:
         print(f"Main Error: {e}")
         return False
-        
-# --- COMMAND: START ---
+
+# --- START COMMAND ---
 @app.on_message(filters.command("start") & filters.private)
-async def start(client, message):
-    user_id = message.from_user.id
-    args = message.text.split()
+async def start(c, m):
+    uid = m.from_user.id
+    args = m.text.split()
     
-    # User Registration
-    user_data = await users.find_one({"user_id": user_id})
+    # Referral & Registration
+    user_data = await users.find_one({"user_id": uid})
     if not user_data:
-        await users.insert_one({"user_id": user_id, "referrals": 0})
+        await users.insert_one({"user_id": uid, "referrals": 0})
         if len(args) > 1 and args[1].isdigit():
-            referrer = int(args[1])
-            if referrer != user_id:
-                await users.update_one({"user_id": referrer}, {"$inc": {"referrals": 1}})
+            ref_id = int(args[1])
+            if ref_id != uid:
+                await users.update_one({"user_id": ref_id}, {"$inc": {"referrals": 1}})
+                try: await c.send_message(ref_id, "🎊 **बधाई हो! एक नया रिफरल मिला।**")
+                except: pass
 
-    # Score & Link
-    current_data = await users.find_one({"user_id": user_id})
-    count = current_data.get("referrals", 0)
-    bot_me = await app.get_me()
+    u = await users.find_one({"user_id": uid})
+    cfg = await config.find_one({"_id": "channels_list"})
+    chans = cfg.get("list", []) if cfg else []
     
-    # Generate Join Buttons dynamically
-    channels = await get_channels()
-    keyboard = []
-    for index, ch in enumerate(channels, 1):
-        keyboard.append([InlineKeyboardButton(f"📢 Join Channel {index}", url=f"https://t.me/{ch}")])
+    kb = [[InlineKeyboardButton(f"📢 Join Channel {i+1}", url=ch['link'])] for i, ch in enumerate(chans)]
+    kb.append([InlineKeyboardButton("🔁 Check Status / Unlock", callback_data="check")])
     
-    keyboard.append([InlineKeyboardButton("🔁 Check Status / Unlock", callback_data="check")])
-
-    await message.reply(
-        f"👋 **नमस्ते {message.from_user.first_name}!**\n\n"
-        f"लिंक के लिए **5 रिफरल** और ऊपर दिए गए सभी चैनल जॉइन करना ज़रूरी है।\n\n"
-        f"📊 आपका स्कोर: **{count}/5**\n"
-        f"🔗 रिफरल लिंक: `https://t.me/{bot_me.username}?start={user_id}`",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+    me = await c.get_me()
+    await m.reply(
+        f"👋 **नमस्ते {m.from_user.first_name}!**\n\n"
+        f"मूवी लिंक के लिए **5 रिफरल** और चैनल जॉइन करना ज़रूरी है।\n\n"
+        f"📊 आपका स्कोर: **{u.get('referrals', 0)}/5**\n"
+        f"🔗 रिफरल लिंक: `https://t.me/{me.username}?start={uid}`",
+        reply_markup=InlineKeyboardMarkup(kb)
     )
 
 # --- ADMIN COMMANDS ---
 
 @app.on_message(filters.command("add_channel") & filters.user(ADMIN))
-async def add_channel(client, message):
-    if len(message.command) < 2:
-        return await message.reply("Usage: `/add_channel channel_username` (बिना @ के)")
+async def add(c, m):
+    args = m.text.split()
+    if len(args) < 3: return await m.reply("❌ सही तरीका: `/add_channel username_या_ID link`")
     
-    new_ch = message.text.split(None, 1)[1].replace("@", "")
-    await config.update_one({"_id": "channels_list"}, {"$addToSet": {"list": new_ch}}, upsert=True)
-    await message.reply(f"✅ चैनल `@{new_ch}` लिस्ट में जोड़ दिया गया है।")
-
-@app.on_message(filters.command("del_channel") & filters.user(ADMIN))
-async def del_channel(client, message):
-    if len(message.command) < 2:
-        return await message.reply("Usage: `/del_channel channel_username`")
+    ch_id = args[1].strip().replace("@", "")
+    ch_link = args[2].strip()
     
-    target_ch = message.text.split(None, 1)[1].replace("@", "")
-    await config.update_one({"_id": "channels_list"}, {"$pull": {"list": target_ch}})
-    await message.reply(f"❌ चैनल `@{target_ch}` लिस्ट से हटा दिया गया है।")
+    await config.update_one(
+        {"_id": "channels_list"}, 
+        {"$addToSet": {"list": {"id": ch_id, "link": ch_link}}}, 
+        upsert=True
+    )
+    await m.reply(f"✅ **चैनल `{ch_id}` सेट हो गया!**")
 
-@app.on_message(filters.command("channels") & filters.user(ADMIN))
-async def list_channels(client, message):
-    channels = await get_channels()
-    if not channels: return await message.reply("अभी कोई चैनल सेट नहीं है।")
-    msg = "**सेट किए गए चैनल्स:**\n\n" + "\n".join([f"• @{c}" for c in channels])
-    await message.reply(msg)
+@app.on_message(filters.command("clear_all") & filters.user(ADMIN))
+async def clear(c, m):
+    await config.delete_one({"_id": "channels_list"})
+    await m.reply("🧹 **डेटाबेस साफ़!** अब नए सिरे से /add_channel करें।")
 
 @app.on_message(filters.command("set") & filters.user(ADMIN))
-async def set_link(client, message):
-    if len(message.command) < 2: return await message.reply("Usage: `/set link`")
-    target = message.text.split(None, 1)[1]
-    await config.update_one({"_id": "target_data"}, {"$set": {"file": target}}, upsert=True)
-    await message.reply("✅ टारगेट लिंक सेट हो गया!")
+async def set_link(c, m):
+    args = m.text.split(None, 1)
+    if len(args) < 2: return await m.reply("Usage: `/set link`")
+    await config.update_one({"_id": "target"}, {"$set": {"link": args[1]}}, upsert=True)
+    await m.reply("✅ **मूवी लिंक सेट हो गया!**")
 
-# --- CHECK CALLBACK ---
+# --- CHECK BUTTON ---
 @app.on_callback_query(filters.regex("check"))
-async def check_callback(client, callback):
-    user_id = callback.from_user.id
-    if not await is_joined(user_id):
-        return await callback.answer("❌ आपने सभी चैनल जॉइन नहीं किए हैं!", show_alert=True)
+async def cb(c, q):
+    if not await is_joined(q.from_user.id):
+        return await q.answer("❌ पहले सभी चैनल जॉइन करें!", show_alert=True)
     
-    user_data = await users.find_one({"user_id": user_id})
-    if user_data and user_data.get("referrals", 0) >= 5:
-        cfg = await config.find_one({"_id": "target_data"})
-        link = cfg.get("file", "Link not set") if cfg else "Link not set"
-        await callback.message.edit_text(f"✅ अनलॉक हो गया!\n\nलिंक: {link}")
+    u = await users.find_one({"user_id": q.from_user.id})
+    if u and u.get("referrals", 0) >= 5:
+        target = await config.find_one({"_id": "target"})
+        link = target.get("link", "Link not set") if target else "Link not set"
+        await q.message.edit_text(f"✅ **अनलॉक हो गया!**\n\nलिंक: {link}")
     else:
-        await callback.answer(f"⚠️ अभी रिफरल कम हैं!", show_alert=True)
+        await q.answer(f"⚠️ स्कोर: {u.get('referrals', 0)}/5 | 5 पूरे करें!", show_alert=True)
 
-# --- RUN ---
-async def run_bot():
-    await start_web_server()
-    await app.start()
-    print("Multi-Channel Admin Bot Started! ✅")
-    await asyncio.Event().wait()
+# --- START BOT ---
+async def main():
+    await start_web()
+    async with app:
+        print("--- BOT IS ONLINE SUCCESSFULLY ---")
+        await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    asyncio.get_event_loop().run_until_complete(run_bot())
-
+    asyncio.run(main())
+    
