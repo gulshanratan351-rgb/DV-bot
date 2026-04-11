@@ -1,110 +1,133 @@
-import os, asyncio, logging
-from pyrogram import Client, filters, errors
+from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from motor.motor_asyncio import AsyncIOMotorClient
-from aiohttp import web
+from flask import Flask
+import threading, os
 
-# --- LOGGING ---
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# ================= CONFIG =================
+API_ID = int(os.environ.get("API_ID"))
+API_HASH = os.environ.get("API_HASH")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+BOT_USERNAME = os.environ.get("BOT_USERNAME")  # without @
 
-# --- CONFIG ---
-API_ID = int(os.environ.get("API_ID", "0"))
-API_HASH = os.environ.get("API_HASH", "")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-MONGO_URL = os.environ.get("MONGO_URL", "")
-ADMIN = int(os.environ.get("ADMIN_ID", "6158373752"))
-PORT = int(os.environ.get("PORT", 8080))
+bot = Client("bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+app = Flask(__name__)
 
-app = Client("dv_movie_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-mongo = AsyncIOMotorClient(MONGO_URL)
-db = mongo["DV_PRO_DATABASE"]
-users = db["users"]
-config = db["config"]
+@app.route('/')
+def home():
+    return "Bot Running ✅"
 
-# --- ⭐ WEB SERVER (ISKI WAJAH SE ERROR AA RAHA THA) ---
-async def start_web():
-    server = web.Application()
-    server.router.add_get("/", lambda r: web.Response(text="Bot is Alive ✅"))
-    runner = web.AppRunner(server)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    logger.info(f"Web Server started on port {PORT}")
+# ================= DATABASE (simple dict) =================
+links_db = {}          # user_id: link
+channels = []          # required channels
+referrals = {}         # user_id: count
+referred_by = {}       # new_user: old_user
 
-# --- JOIN CHECK ---
-async def is_joined(user_id):
+REQUIRED_REF = 5       # 🔥 required shares
+
+# ================= START =================
+@bot.on_message(filters.command("start"))
+async def start(client, message):
+    user_id = message.from_user.id
+
+    # Referral system
+    if len(message.command) > 1:
+        ref_id = int(message.command[1])
+
+        if user_id != ref_id:
+            if user_id not in referred_by:
+                referred_by[user_id] = ref_id
+                referrals[ref_id] = referrals.get(ref_id, 0) + 1
+
+    await message.reply_text(
+        "👋 Welcome!\n\n"
+        "🔐 Send /create <link>\n"
+        "Example:\n/create https://mega.nz/file/abc123"
+    )
+
+# ================= ADD CHANNEL =================
+@bot.on_message(filters.command("addchannel"))
+async def add_channel(client, message):
+    ch = message.text.split(" ")[1]
+    channels.append(ch)
+    await message.reply_text(f"✅ Added {ch}")
+
+# ================= CREATE LINK =================
+@bot.on_message(filters.command("create"))
+async def create(client, message):
     try:
-        cfg = await config.find_one({"_id": "channels_list"})
-        chans = cfg.get("list", []) if cfg else []
-        if not chans: return True
-        for ch in chans:
-            raw_id = str(ch['id']).strip().replace("@", "")
-            target = int(raw_id) if raw_id.startswith("-") or raw_id.isdigit() else raw_id
-            member = await app.get_chat_member(target, user_id)
-            if member.status in ["kicked", "left"]: return False
-        return True
-    except: return False
+        link = message.text.split(" ")[1]
+        user_id = message.from_user.id
 
-# --- HANDLERS ---
-@app.on_message(filters.command("start") & filters.private)
-async def start(c, m):
-    uid = m.from_user.id
-    if not await users.find_one({"user_id": uid}):
-        await users.insert_one({"user_id": uid, "referrals": 0})
-        if len(m.command) > 1 and m.command[1].isdigit():
-            ref_id = int(m.command[1])
-            if ref_id != uid:
-                await users.update_one({"user_id": ref_id}, {"$inc": {"referrals": 1}})
-                try: await c.send_message(ref_id, "✅ **Naya Referral mila!**")
-                except: pass
+        links_db[user_id] = link
+        referrals[user_id] = 0  # reset count
 
-    u = await users.find_one({"user_id": uid})
-    cfg = await config.find_one({"_id": "channels_list"})
-    chans = cfg.get("list", []) if cfg else []
-    kb = [[InlineKeyboardButton(f"📢 Join Channel {i+1}", url=ch['link'])] for i, ch in enumerate(chans)]
-    kb.append([InlineKeyboardButton("🔁 Check Status / Unlock", callback_data="check")])
-    
-    me = await c.get_me()
-    await m.reply(f"👋 **नमस्ते {m.from_user.first_name}!**\n\nमूवी के लिए **5 रिफरल** और चैनल जॉइन करना ज़रूरी है।\n\n📊 स्कोर: **{u.get('referrals', 0)}/5**\n🔗 लिंक: `https://t.me/{me.username}?start={uid}`", reply_markup=InlineKeyboardMarkup(kb))
+        # 🔗 referral link
+        share_link = f"https://t.me/{BOT_USERNAME}?start={user_id}"
 
-@app.on_message(filters.command("add_channel") & filters.user(ADMIN))
-async def add(c, m):
-    if len(m.command) < 3: return await m.reply("❌ `/add_channel username link`")
-    ch_id = m.command[1].strip().replace("@", "")
-    await config.update_one({"_id": "channels_list"}, {"$addToSet": {"list": {"id": ch_id, "link": m.command[2]}}}, upsert=True)
-    await m.reply(f"✅ Channel `{ch_id}` set!")
+        btn = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔍 Check Access", callback_data="check")],
+            [InlineKeyboardButton("📤 Share Link", url=share_link)]
+        ])
 
-@app.on_message(filters.command("clear_all") & filters.user(ADMIN))
-async def clear(c, m):
-    await config.delete_one({"_id": "channels_list"})
-    await m.reply("🧹 **Database साफ़!**")
+        await message.reply_text(
+            f"🔐 Link Locked!\n\n"
+            f"📊 Required:\n"
+            f"👉 Join all channels\n"
+            f"👉 {REQUIRED_REF} users join via your link\n\n"
+            f"📤 Share this link:\n{share_link}",
+            reply_markup=btn
+        )
 
-@app.on_message(filters.command("set") & filters.user(ADMIN))
-async def set_link(c, m):
-    if len(m.command) < 2: return await m.reply("❌ `/set link`")
-    await config.update_one({"_id": "target"}, {"$set": {"link": m.text.split(None, 1)[1]}}, upsert=True)
-    await m.reply("✅ **Target link set!**")
+    except:
+        await message.reply_text("❌ Use: /create <link>")
 
-@app.on_callback_query(filters.regex("check"))
-async def cb(c, q):
-    if not await is_joined(q.from_user.id):
-        return await q.answer("❌ पहले सभी चैनल जॉइन करें!", show_alert=True)
-    u = await users.find_one({"user_id": q.from_user.id})
-    if u and u.get("referrals", 0) >= 5:
-        target = await config.find_one({"_id": "target"})
-        link = target.get("link", "Set nahi hai") if target else "Set nahi hai"
-        await q.message.edit_text(f"✅ **अनलॉक हो गया!**\n\nलिंक: {link}")
-    else:
-        await q.answer(f"⚠️ स्कोर: {u.get('referrals', 0)}/5", show_alert=True)
+# ================= CHECK ACCESS =================
+@bot.on_callback_query()
+async def check(client, query):
+    user_id = query.from_user.id
 
-# --- START BOT ---
-async def main():
-    await start_web() # Ab ye function upar define hai
-    async with app:
-        logger.info("DV BOT ONLINE ✅")
-        await asyncio.Event().wait()
+    # 1️⃣ Check channels
+    not_joined = []
+
+    for ch in channels:
+        try:
+            member = await bot.get_chat_member(ch, user_id)
+            if member.status in ["left", "kicked"]:
+                not_joined.append(ch)
+        except:
+            not_joined.append(ch)
+
+    if not_joined:
+        btn = []
+        for ch in not_joined:
+            btn.append([InlineKeyboardButton(f"Join {ch}", url=f"https://t.me/{ch.replace('@','')}")])
+
+        return await query.message.reply_text(
+            "❌ पहले सभी चैनल join करो",
+            reply_markup=InlineKeyboardMarkup(btn)
+        )
+
+    # 2️⃣ Check referrals
+    count = referrals.get(user_id, 0)
+
+    if count < REQUIRED_REF:
+        return await query.message.reply_text(
+            f"❌ अभी {count}/{REQUIRED_REF} users joined\n"
+            f"📤 Share more!"
+        )
+
+    # 3️⃣ Unlock link
+    link = links_db.get(user_id, "❌ Not Found")
+
+    await query.message.reply_text(
+        f"✅ Access Granted!\n\n🔗 {link}"
+    )
+
+# ================= RUN =================
+def run_bot():
+    bot.run()
+
+threading.Thread(target=run_bot).start()
 
 if __name__ == "__main__":
-    asyncio.run(main())
-    
+    app.run(host="0.0.0.0", port=8080)
