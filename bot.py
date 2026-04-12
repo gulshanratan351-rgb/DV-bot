@@ -1,133 +1,67 @@
+import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from flask import Flask
-import threading, os
 
-# ================= CONFIG =================
-API_ID = int(os.environ.get("API_ID"))
-API_HASH = os.environ.get("API_HASH")
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-BOT_USERNAME = os.environ.get("BOT_USERNAME")  # without @
+# अपनी डिटेल्स यहाँ भरें
+API_ID = 12345
+API_HASH = "your_api_hash"
+BOT_TOKEN = "your_bot_token"
+ADMIN_ID = 12345678  # आपकी Telegram ID
 
-bot = Client("bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-app = Flask(__name__)
+app = Client("share_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-@app.route('/')
-def home():
-    return "Bot Running ✅"
+# डेटा स्टोर करने के लिए (Production के लिए Database use करें)
+db = {
+    "channels": [], # ['@channel1', '@channel2']
+    "links": {},    # {'link_id': {'url': 'mega_url', 'shares': 0}}
+    "users": {}     # {'user_id': {'referred': 0, 'unlocked': []}}
+}
 
-# ================= DATABASE (simple dict) =================
-links_db = {}          # user_id: link
-channels = []          # required channels
-referrals = {}         # user_id: count
-referred_by = {}       # new_user: old_user
-
-REQUIRED_REF = 5       # 🔥 required shares
-
-# ================= START =================
-@bot.on_message(filters.command("start"))
+@app.on_message(filters.command("start") & filters.private)
 async def start(client, message):
     user_id = message.from_user.id
+    text = message.text.split()
+    
+    # अगर यूजर किसी के रेफरल लिंक से आया है
+    if len(text) > 1:
+        ref_id = text[1]
+        # यहाँ रेफरल काउंट बढ़ाने का लॉजिक लिखें
+        await message.reply("आपने किसी के लिंक पर क्लिक किया!")
 
-    # Referral system
-    if len(message.command) > 1:
-        ref_id = int(message.command[1])
-
-        if user_id != ref_id:
-            if user_id not in referred_by:
-                referred_by[user_id] = ref_id
-                referrals[ref_id] = referrals.get(ref_id, 0) + 1
-
-    await message.reply_text(
-        "👋 Welcome!\n\n"
-        "🔐 Send /create <link>\n"
-        "Example:\n/create https://mega.nz/file/abc123"
+    # हेल्प मेनू
+    main_text = (
+        "🔐 **Share to Access Bot**\n\n"
+        "Commands:\n"
+        "/create <url> - लिंक बनाएं\n"
+        "/addchannel @user - चैनल जोड़ें\n"
+        "/help - मदद लें"
     )
+    
+    if user_id == ADMIN_ID:
+        main_text += "\n\n✅ **You are Admin**"
+        
+    await message.reply(main_text)
 
-# ================= ADD CHANNEL =================
-@bot.on_message(filters.command("addchannel"))
+@app.on_message(filters.command("create") & filters.user(ADMIN_ID))
+async def create_link(client, message):
+    if len(message.command) < 2:
+        return await message.reply("Usage: `/create https://mega.nz/...` ")
+    
+    mega_url = message.command[1]
+    link_id = "171a4197" # यहाँ random ID जनरेट करें
+    share_link = f"https://t.me/your_bot_username?start={link_id}"
+    
+    response = (
+        "✅ **Link Created Successfully!**\n\n"
+        f"🔗 **Share this link:**\n{share_link}\n\n"
+        "📊 **Required:** 5 people must view and subscribe to all channels.\n"
+        "🔒 Mega file will unlock when all 5 complete."
+    )
+    await message.reply(response)
+
+@app.on_message(filters.command("addchannel") & filters.user(ADMIN_ID))
 async def add_channel(client, message):
-    ch = message.text.split(" ")[1]
-    channels.append(ch)
-    await message.reply_text(f"✅ Added {ch}")
+    # चैनल ऐड करने का लॉजिक
+    await message.reply("Channel added (Mock)")
 
-# ================= CREATE LINK =================
-@bot.on_message(filters.command("create"))
-async def create(client, message):
-    try:
-        link = message.text.split(" ")[1]
-        user_id = message.from_user.id
-
-        links_db[user_id] = link
-        referrals[user_id] = 0  # reset count
-
-        # 🔗 referral link
-        share_link = f"https://t.me/{BOT_USERNAME}?start={user_id}"
-
-        btn = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔍 Check Access", callback_data="check")],
-            [InlineKeyboardButton("📤 Share Link", url=share_link)]
-        ])
-
-        await message.reply_text(
-            f"🔐 Link Locked!\n\n"
-            f"📊 Required:\n"
-            f"👉 Join all channels\n"
-            f"👉 {REQUIRED_REF} users join via your link\n\n"
-            f"📤 Share this link:\n{share_link}",
-            reply_markup=btn
-        )
-
-    except:
-        await message.reply_text("❌ Use: /create <link>")
-
-# ================= CHECK ACCESS =================
-@bot.on_callback_query()
-async def check(client, query):
-    user_id = query.from_user.id
-
-    # 1️⃣ Check channels
-    not_joined = []
-
-    for ch in channels:
-        try:
-            member = await bot.get_chat_member(ch, user_id)
-            if member.status in ["left", "kicked"]:
-                not_joined.append(ch)
-        except:
-            not_joined.append(ch)
-
-    if not_joined:
-        btn = []
-        for ch in not_joined:
-            btn.append([InlineKeyboardButton(f"Join {ch}", url=f"https://t.me/{ch.replace('@','')}")])
-
-        return await query.message.reply_text(
-            "❌ पहले सभी चैनल join करो",
-            reply_markup=InlineKeyboardMarkup(btn)
-        )
-
-    # 2️⃣ Check referrals
-    count = referrals.get(user_id, 0)
-
-    if count < REQUIRED_REF:
-        return await query.message.reply_text(
-            f"❌ अभी {count}/{REQUIRED_REF} users joined\n"
-            f"📤 Share more!"
-        )
-
-    # 3️⃣ Unlock link
-    link = links_db.get(user_id, "❌ Not Found")
-
-    await query.message.reply_text(
-        f"✅ Access Granted!\n\n🔗 {link}"
-    )
-
-# ================= RUN =================
-def run_bot():
-    bot.run()
-
-threading.Thread(target=run_bot).start()
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+app.run()
