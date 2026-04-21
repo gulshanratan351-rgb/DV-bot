@@ -1,7 +1,4 @@
-pyrogram
-tgcrypto
-motor
-aiohttp
 flask
-
-
+pymongo
+pyTelegramBotAPI
+gunicorn
